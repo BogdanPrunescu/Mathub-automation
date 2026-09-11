@@ -1,124 +1,132 @@
-# Mathub Material Extractor
+# Mathub Material Extractor v0.2
 
-Deterministic first-stage ingestion for the Mathub Automation of Material Extraction project.
+Deterministic source ingestion for the Mathub Automation of Material Extraction project.
 
-The tool reads a selectable-text PDF and creates a source-faithful JSON representation containing:
+v0.2 fixes the main problem found on the first real ALL manual: a PDF may look/select normally while its native Unicode text map is unusable. The extractor now uses progressive extraction depth:
 
-- document metadata and SHA-256;
-- PDF table of contents where available;
-- page identity, page labels, dimensions, and rotation;
-- text blocks;
-- lines and spans;
-- bounding boxes and font metadata;
-- both raw PDF block order and a derived reading-order index;
-- extracted image assets and their page positions;
-- canonical text plus a separate normalized search form.
+```text
+PyMuPDF native extraction
+        ↓
+quality gate
+        ↓
+if needed: Poppler pdftotext fallback (still deterministic, no OCR)
+        ↓
+quality gate + unresolved-glyph warnings
+        ↓
+page-based canonical source representation
+```
 
-It deliberately does **not**:
+There are **no LLM/API calls** and **no OCR** in v0.2.
 
-- create Source Evidence Units;
-- classify definitions / properties / examples;
-- rewrite text;
-- use an LLM;
-- perform OCR;
-- synthesize lesson content;
-- infer mathematical meaning.
+## Why Poppler is included as a fallback
 
-That separation is intentional: this repository establishes the deterministic source layer that later semantic stages can reference.
+The ALL textbook tested during development contains old custom PDF fonts. PyMuPDF correctly recovers geometry, but the native text map contains control characters. Poppler is able to decode most of that legacy text deterministically. v0.2 uses Poppler only when the cheaper/native text quality gate says it is needed.
 
-## Windows + VS Code setup
+Known Romanian legacy forms such as `compoziþie`, `Sã`, and `cunoºtinþã` are converted deterministically to `compoziţie`, `Să`, and `cunoştinţă`.
 
-### 1. Install Python
+Mathematical/symbol glyphs that remain unresolved are never guessed; they are marked for visual checking.
 
-Use a 64-bit Python installation from python.org. Python 3.12 or 3.13 is recommended for this project.
+# Windows + VS Code setup
 
-Verify from PowerShell:
+## 1. Python
+
+Python 3.12 is recommended.
 
 ```powershell
 py --version
 ```
 
-### 2. Open the repository in VS Code
-
-```powershell
-cd path\to\mathub-material-extractor
-code .
-```
-
-Install Microsoft's **Python** extension if VS Code does not already have it.
-
-### 3. Create a virtual environment
-
-From the VS Code terminal:
+Create and activate a virtual environment:
 
 ```powershell
 py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-```
-
-If PowerShell refuses to run the activation script, run once:
-
-```powershell
-Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
-```
-
-Then activate again.
-
-### 4. Install the project
-
-```powershell
 python -m pip install -e ".[dev]"
 ```
 
-### 5. Select the interpreter in VS Code
+In VS Code: `Ctrl+Shift+P` -> `Python: Select Interpreter` -> choose `.venv\Scripts\python.exe`.
 
-Press `Ctrl+Shift+P` -> **Python: Select Interpreter** -> choose:
+## 2. Install Poppler on Windows
 
-```text
-.venv\Scripts\python.exe
+Poppler is needed for manuals whose native PDF text map fails the quality gate.
+
+The easiest Windows Package Manager installation is:
+
+```powershell
+winget install --id oschwartz10612.Poppler -e
 ```
 
-### 6. Run tests
+Open a **new terminal** afterward and verify:
+
+```powershell
+pdftotext -v
+```
+
+If `pdftotext` is not on PATH, you can still use v0.2 by passing its full executable path:
+
+```powershell
+mathub-extract "C:\Manuals\manual.pdf" `
+  --manual-id manual-all `
+  --output ".\outputs\manual-all" `
+  --pdftotext "C:\path\to\pdftotext.exe"
+```
+
+## 3. Run tests
 
 ```powershell
 pytest
 ```
 
-### 7. Extract a manual
+## 4. Process a manual
 
 ```powershell
-mathub-extract "C:\path\manual.pdf" `
-  --manual-id manual-a `
-  --output "C:\path\outputs\manual-a"
+mathub-extract "C:\Manuals\manual_xii_M2_Editura ALL.pdf" `
+  --manual-id manual-all `
+  --output ".\outputs\manual-all"
 ```
 
-The result is:
+The default backend policy is `auto`:
+
+- use PyMuPDF native text when it is clean;
+- invoke Poppler only if native extraction is suspect/unusable;
+- choose the better page representation;
+- preserve unresolved glyphs as warnings rather than inventing them.
+
+For debugging you can force one backend:
+
+```powershell
+mathub-extract "C:\Manuals\manual.pdf" --manual-id test --output ".\outputs\test" --backend native
+mathub-extract "C:\Manuals\manual.pdf" --manual-id test --output ".\outputs\test" --backend poppler
+```
+
+# Output
 
 ```text
-outputs/
-└── manual-a/
-    ├── document.json
-    └── assets/
-        └── image-<sha256>.<ext>
+outputs/manual-all/
+├── manifest.json
+├── report.json
+├── report.txt
+├── pages/
+│   ├── p0001.json
+│   ├── p0002.json
+│   └── ...
+└── assets/
+    └── image-<sha256>.<ext>
 ```
 
-You can also run the module directly:
+Start by reading `report.txt`, **not the JSON**. It tells you whether the manual is usable and which fallback was used.
 
-```powershell
-python -m mathub_extractor.cli "C:\path\manual.pdf" --manual-id manual-a --output ".\outputs\manual-a"
-```
+The page JSON is machine-facing evidence for later lesson localization and SEU creation.
 
-## Design invariants
+# v0.2 invariants
 
-1. `text` is the canonical PyMuPDF-extracted text. Never silently normalize it in place.
-2. `search_text` is derived and disposable. It is not source truth.
-3. All geometry is retained as PDF coordinates.
-4. Original block number and derived reading order are both stored.
-5. Image bytes are stored as separate assets rather than embedded in JSON.
-6. Every run records source file hash, extractor version, schema version, and PyMuPDF version.
-7. Semantic classification belongs in a later stage.
-
-## Current limitation
-
-This v0.1 captures text and embedded image blocks. It does not serialize arbitrary PDF vector drawings as educational evidence. Before trusting a lesson region containing important graphs or vector-only mathematics, that case must be handled explicitly.
+1. The original PDF is always authoritative.
+2. No semantic rewriting occurs during ingestion.
+3. Native text is preferred when reliable.
+4. More expensive/complex fallback runs only where the native path fails.
+5. Unresolved symbols are surfaced, not guessed.
+6. Provenance includes source PDF hash, page coordinates, backend, backend version, and extraction quality.
+7. Text is stored once at span/word level to avoid v0.1's massive duplication.
+8. Images remain separate content-addressed assets.
+9. SEUs, alignment, lesson synthesis, embeddings, LLMs, and OCR remain outside this repository stage.

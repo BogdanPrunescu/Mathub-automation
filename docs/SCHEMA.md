@@ -1,94 +1,65 @@
-# Canonical extraction schema v0.1.0
+# Canonical extraction schema v0.2.0
 
-The JSON output is a deterministic source representation, not a semantic educational representation.
+v0.2 separates source-wide metadata from per-page evidence and adds extraction-quality provenance.
 
-## Top level
+## Output layout
 
-- `schema_version`
-- `extractor`
-- `source`
-- `pdf_metadata`
-- `toc`
-- `pages`
+```text
+<manual-output>/
+├── manifest.json
+├── report.json
+├── report.txt
+├── pages/
+│   ├── p0001.json
+│   ├── p0002.json
+│   └── ...
+└── assets/
+    └── image-<sha256>.<ext>
+```
 
-## Source
+## Stable source identity
 
-- `manual_id`: stable logical identifier supplied by the caller
-- `filename`
-- `sha256`
-- `size_bytes`
+A page/span reference is meaningful together with:
 
-## Page
-
-Each page has:
-
-- `id`: `p0001`, `p0002`, ...
-- `pdf_page_index`: 0-based
-- `pdf_page_number`: 1-based
-- `page_label`: PDF page label if defined
-- `width`
-- `height`
-- `rotation`
-- `text_char_count`
-- `plain_text_reading_order`
-- `blocks`
-- `warnings`
-
-## Text block
-
-- `id`: e.g. `p0042-b0007`
-- `type`: `text`
-- `source_block_number`: PyMuPDF block number
-- `raw_order_index`: order in the PDF text representation
-- `reading_order_index`: PyMuPDF's top-left reading-order result
-- `bbox`
-- `text`: canonical extracted block text
-- `search_text`: separate normalized text for cheap search
-- `lines`
-
-## Line
-
-- `id`
-- `index`
-- `bbox`
-- `writing_mode`
-- `direction`
-- `text`
-- `spans`
-
-## Span
-
-- `id`
-- `index`
-- `text`
-- `bbox`
-- `origin`
-- `font`
-- `size`
-- `flags`
-- `flag_names`
-- `color`
-- `ascender`
-- `descender`
-
-A later semantic stage can form SEUs by referencing one or more span / line / block IDs without copying or inventing source text.
-
-## Image block
-
-Embedded image bytes are written once to `assets/` under a SHA-256-derived filename. The JSON stores:
-
-- source location;
-- bbox;
-- metadata;
-- `asset_sha256`;
-- `asset_path`.
-
-## Stable-reference rule
-
-A reference into the extracted representation is meaningful together with:
-
+- manual ID;
 - source PDF SHA-256;
 - schema version;
 - extractor version.
 
-If the source PDF changes, it is a different source artifact even if the filename is unchanged.
+Changing the source PDF hash means a different source artifact, even if its filename is unchanged.
+
+## Canonical page representation
+
+Each page stores:
+
+- PDF page identity and geometry;
+- one chosen text layer;
+- text quality metrics;
+- ordered text blocks;
+- ordered lines;
+- source spans/words with bounding boxes;
+- image assets and bounding boxes;
+- warnings.
+
+Text is stored only at span/word level. Block/page text is derived when needed, avoiding the v0.1 duplication that made `document.json` very large.
+
+## Text backends
+
+### `PYMUPDF_NATIVE`
+
+Used when native PDF Unicode extraction passes the quality gate. It retains font and span metadata.
+
+### `POPPLER_PDFTOTEXT`
+
+Used only when the native quality gate is worse and Poppler is available. Poppler's `-bbox-layout` mode supplies deterministic word coordinates. Known Romanian legacy-encoding artefacts are normalized without rewriting content.
+
+Invalid PDF glyph/control codes that cannot be represented in XML are **not guessed**. The visible text contains `�`, while `unresolved_source_codes` preserves the original code (for example `U+001D`). Such spans receive `REQUIRES_VISUAL_CHECK`.
+
+## Quality states
+
+- `GOOD`: machine-readable text is suitable for downstream localization/unitization.
+- `SUSPECT`: mostly usable, but some glyphs require checking against the original page.
+- `EMPTY`: no machine-readable text was found.
+- `UNUSABLE`: do not create SEUs from the extracted text.
+
+The original PDF is always the source authority.

@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mathub-material-extractor"
-version = "0.1.0"
-description = "Deterministic PDF ingestion and source-faithful extraction for the Mathub material pipeline."
+version = "0.2.0"
+description = "Deterministic PDF ingestion with quality-gated text extraction for the Mathub material pipeline."
 readme = "README.md"
 requires-python = ">=3.12,<3.15"
 dependencies = [
-    "PyMuPDF==1.28.2",
+    "PyMuPDF>=1.26,<1.29",
 ]
 
 [project.optional-dependencies]

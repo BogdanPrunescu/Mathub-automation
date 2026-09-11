@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from datetime import datetime, timezone
 from importlib.metadata import version as package_version
 from pathlib import Path
@@ -9,19 +10,21 @@ import pymupdf
 
 from . import SCHEMA_VERSION, __version__
 from .hashing import sha256_bytes, sha256_file
-from .normalize import make_search_text
+from .io import write_json, write_text
+from .poppler import PopplerInfo, extract_poppler_pages, find_pdftotext
+from .quality import assess_text, status_rank
 
 
 def _list4(value: Any) -> list[float] | None:
     if value is None:
         return None
-    return [float(x) for x in value]
+    return [round(float(x), 3) for x in value]
 
 
 def _list2(value: Any) -> list[float] | None:
     if value is None:
         return None
-    return [float(x) for x in value]
+    return [round(float(x), 3) for x in value]
 
 
 def _flag_names(flags: int) -> list[str]:
@@ -30,31 +33,25 @@ def _flag_names(flags: int) -> list[str]:
         names.append("superscript")
     if flags & (1 << 1):
         names.append("italic")
-    if flags & (1 << 2):
-        names.append("serif")
-    else:
-        names.append("sans")
-    if flags & (1 << 3):
-        names.append("monospaced")
-    else:
-        names.append("proportional")
+    names.append("serif" if flags & (1 << 2) else "sans")
+    names.append("monospaced" if flags & (1 << 3) else "proportional")
     if flags & (1 << 4):
         names.append("bold")
     return names
 
 
-def _line_text(line: dict[str, Any]) -> str:
-    return "".join(str(span.get("text", "")) for span in line.get("spans", []))
+def _raw_span_text(span: dict[str, Any]) -> str:
+    return "".join(str(char.get("c", "")) for char in span.get("chars", []))
 
 
-def _block_text(block: dict[str, Any]) -> str:
-    return "\n".join(_line_text(line) for line in block.get("lines", []))
-
-
-def _safe_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
-    if not metadata:
-        return {}
-    return {str(k): v for k, v in metadata.items()}
+def _raw_page_text(blocks: list[dict]) -> str:
+    block_texts: list[str] = []
+    for block in blocks:
+        line_texts: list[str] = []
+        for line in block.get("lines", []):
+            line_texts.append("".join(span["text"] for span in line["spans"]))
+        block_texts.append("\n".join(line_texts))
+    return "\n\n".join(block_texts)
 
 
 def _reading_order_map(page: pymupdf.Page) -> dict[int, int]:
@@ -67,124 +64,175 @@ def _reading_order_map(page: pymupdf.Page) -> dict[int, int]:
     return mapping
 
 
-def _extract_span(
-    span: dict[str, Any],
-    *,
-    page_id: str,
-    block_index: int,
-    line_index: int,
-    span_index: int,
-) -> dict[str, Any]:
-    flags = int(span.get("flags", 0))
-    span_id = f"{page_id}-b{block_index + 1:04d}-l{line_index + 1:03d}-s{span_index + 1:03d}"
+def _extract_native_text_blocks(page: pymupdf.Page, page_id: str) -> tuple[list[dict], str]:
+    raw = page.get_text("rawdict", sort=False)
+    reading_map = _reading_order_map(page)
+    blocks_out: list[dict] = []
 
-    return {
-        "id": span_id,
-        "index": span_index,
-        "text": str(span.get("text", "")),
-        "bbox": _list4(span.get("bbox")),
-        "origin": _list2(span.get("origin")),
-        "font": span.get("font"),
-        "size": float(span["size"]) if span.get("size") is not None else None,
-        "flags": flags,
-        "flag_names": _flag_names(flags),
-        "color": span.get("color"),
-        "ascender": float(span["ascender"]) if span.get("ascender") is not None else None,
-        "descender": float(span["descender"]) if span.get("descender") is not None else None,
-    }
+    for raw_order_index, block in enumerate(raw.get("blocks", [])):
+        if int(block.get("type", -1)) != 0:
+            continue
 
+        block_id = f"{page_id}-b{raw_order_index + 1:04d}"
+        lines_out: list[dict] = []
 
-def _extract_text_block(
-    block: dict[str, Any],
-    *,
-    page_id: str,
-    raw_order_index: int,
-    reading_order_index: int | None,
-) -> dict[str, Any]:
-    block_id = f"{page_id}-b{raw_order_index + 1:04d}"
-    lines_out: list[dict[str, Any]] = []
+        for line_index, line in enumerate(block.get("lines", [])):
+            spans_out: list[dict] = []
+            for span_index, span in enumerate(line.get("spans", [])):
+                text = _raw_span_text(span)
+                spans_out.append(
+                    {
+                        "id": f"{block_id}-l{line_index + 1:03d}-s{span_index + 1:03d}",
+                        "index": span_index,
+                        "text": text,
+                        "bbox": _list4(span.get("bbox")),
+                        "origin": _list2(span.get("origin")),
+                        "font": span.get("font"),
+                        "size": float(span["size"]) if span.get("size") is not None else None,
+                        "flags": int(span.get("flags", 0)),
+                        "flag_names": _flag_names(int(span.get("flags", 0))),
+                        "extraction_method": "PYMUPDF_NATIVE",
+                        "extraction_confidence": "HIGH",
+                    }
+                )
 
-    for line_index, line in enumerate(block.get("lines", [])):
-        spans_out = [
-            _extract_span(
-                span,
-                page_id=page_id,
-                block_index=raw_order_index,
-                line_index=line_index,
-                span_index=span_index,
+            lines_out.append(
+                {
+                    "id": f"{block_id}-l{line_index + 1:03d}",
+                    "index": line_index,
+                    "bbox": _list4(line.get("bbox")),
+                    "writing_mode": line.get("wmode"),
+                    "direction": _list2(line.get("dir")),
+                    "spans": spans_out,
+                }
             )
-            for span_index, span in enumerate(line.get("spans", []))
-        ]
 
-        line_text = _line_text(line)
-        lines_out.append(
+        number = block.get("number")
+        blocks_out.append(
             {
-                "id": f"{block_id}-l{line_index + 1:03d}",
-                "index": line_index,
-                "bbox": _list4(line.get("bbox")),
-                "writing_mode": line.get("wmode"),
-                "direction": _list2(line.get("dir")),
-                "text": line_text,
-                "spans": spans_out,
+                "id": block_id,
+                "type": "text",
+                "source_block_number": number,
+                "raw_order_index": raw_order_index,
+                "reading_order_index": (
+                    reading_map.get(number) if isinstance(number, int) else None
+                ),
+                "bbox": _list4(block.get("bbox")),
+                "lines": lines_out,
             }
         )
 
-    text = _block_text(block)
+    return blocks_out, _raw_page_text(blocks_out)
 
+
+def _extract_images(page: pymupdf.Page, page_id: str, assets_dir: Path) -> list[dict]:
+    data = page.get_text("dict", sort=False)
+    images_out: list[dict] = []
+    image_index = 0
+
+    for block in data.get("blocks", []):
+        if int(block.get("type", -1)) != 1:
+            continue
+
+        image_bytes = block.get("image")
+        asset_sha256 = None
+        asset_path = None
+        if isinstance(image_bytes, (bytes, bytearray)):
+            payload = bytes(image_bytes)
+            asset_sha256 = sha256_bytes(payload)
+            ext = str(block.get("ext") or "bin").lower()
+            filename = f"image-{asset_sha256}.{ext}"
+            destination = assets_dir / filename
+            if not destination.exists():
+                destination.write_bytes(payload)
+            asset_path = f"assets/{filename}"
+
+        images_out.append(
+            {
+                "id": f"{page_id}-img{image_index + 1:03d}",
+                "bbox": _list4(block.get("bbox")),
+                "width_px": block.get("width"),
+                "height_px": block.get("height"),
+                "extension": block.get("ext"),
+                "colorspace": block.get("colorspace"),
+                "bits_per_component": block.get("bpc"),
+                "asset_sha256": asset_sha256,
+                "asset_path": asset_path,
+            }
+        )
+        image_index += 1
+
+    return images_out
+
+
+def _aggregate_statuses(pages: list[dict]) -> dict:
+    statuses = Counter(page["text_layer"]["quality"]["status"] for page in pages)
+    methods = Counter(page["text_layer"]["backend"] for page in pages)
     return {
-        "id": block_id,
-        "type": "text",
-        "source_block_number": block.get("number"),
-        "raw_order_index": raw_order_index,
-        "reading_order_index": reading_order_index,
-        "bbox": _list4(block.get("bbox")),
-        "text": text,
-        "search_text": make_search_text(text),
-        "lines": lines_out,
+        "page_status_counts": dict(sorted(statuses.items())),
+        "backend_page_counts": dict(sorted(methods.items())),
     }
 
 
-def _extract_image_block(
-    block: dict[str, Any],
-    *,
-    page_id: str,
-    raw_order_index: int,
-    reading_order_index: int | None,
-    assets_dir: Path,
-) -> dict[str, Any]:
-    image_bytes = block.get("image")
-    asset_sha256 = None
-    asset_path = None
+def _overall_status(pages: list[dict]) -> str:
+    statuses = [page["text_layer"]["quality"]["status"] for page in pages]
+    if any(status == "UNUSABLE" for status in statuses):
+        return "FAILED"
+    if any(status == "SUSPECT" for status in statuses):
+        return "USABLE_WITH_WARNINGS"
+    return "USABLE"
 
-    if isinstance(image_bytes, (bytes, bytearray)):
-        data = bytes(image_bytes)
-        asset_sha256 = sha256_bytes(data)
-        ext = str(block.get("ext") or "bin").lower()
-        filename = f"image-{asset_sha256}.{ext}"
-        destination = assets_dir / filename
-        if not destination.exists():
-            destination.write_bytes(data)
-        asset_path = f"assets/{filename}"
 
-    return {
-        "id": f"{page_id}-b{raw_order_index + 1:04d}",
-        "type": "image",
-        "source_block_number": block.get("number"),
-        "raw_order_index": raw_order_index,
-        "reading_order_index": reading_order_index,
-        "bbox": _list4(block.get("bbox")),
-        "width_px": block.get("width"),
-        "height_px": block.get("height"),
-        "extension": block.get("ext"),
-        "colorspace": block.get("colorspace"),
-        "bits_per_component": block.get("bpc"),
-        "xres": block.get("xres"),
-        "yres": block.get("yres"),
-        "encoded_size_bytes": len(image_bytes) if isinstance(image_bytes, (bytes, bytearray)) else None,
-        "transform": [float(x) for x in block.get("transform", [])] or None,
-        "asset_sha256": asset_sha256,
-        "asset_path": asset_path,
-    }
+def _report_text(manifest: dict) -> str:
+    summary = manifest["extraction_summary"]
+    source = manifest["source"]
+    lines = [
+        "Mathub deterministic extraction report",
+        "=" * 39,
+        "",
+        f"Manual: {source['filename']}",
+        f"Manual ID: {source['manual_id']}",
+        f"Pages: {source['page_count']}",
+        f"Source SHA-256: {source['sha256']}",
+        "",
+        f"Overall status: {summary['overall_status']}",
+        "",
+        "Canonical text backends:",
+    ]
+    for backend, count in summary["backend_page_counts"].items():
+        lines.append(f"  {backend}: {count} page(s)")
+    lines.extend(["", "Page text quality:"])
+    for status, count in summary["page_status_counts"].items():
+        lines.append(f"  {status}: {count} page(s)")
+
+    poppler = summary.get("poppler")
+    if poppler:
+        lines.extend(
+            [
+                "",
+                "Poppler fallback:",
+                f"  {poppler['version']}",
+                "  Illegal XML control glyphs preserved as unresolved: "
+                f"{poppler['illegal_xml_controls_preserved_as_unresolved']}",
+                f"  Unresolved glyph count: {poppler['unresolved_glyph_count']}",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "Interpretation:",
+            "  GOOD     = text can be used as machine-readable source text.",
+            "  SUSPECT  = mostly usable, but unresolved glyphs require visual evidence/checking.",
+            "  EMPTY    = no machine-readable text was found on the page.",
+            "  UNUSABLE = text extraction failed; do not create semantic units from it.",
+            "",
+            "The original PDF remains the authority. The extracted representation is evidence indexing,",
+            "not a replacement for the source document.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def extract_pdf(
@@ -192,108 +240,141 @@ def extract_pdf(
     *,
     manual_id: str,
     output_dir: Path,
-) -> dict[str, Any]:
+    pdftotext_path: Path | None = None,
+    force_backend: str = "auto",
+) -> dict:
     pdf_path = pdf_path.resolve()
     output_dir = output_dir.resolve()
+    pages_dir = output_dir / "pages"
     assets_dir = output_dir / "assets"
-    output_dir.mkdir(parents=True, exist_ok=True)
+    pages_dir.mkdir(parents=True, exist_ok=True)
     assets_dir.mkdir(parents=True, exist_ok=True)
 
     source_sha256 = sha256_file(pdf_path)
+    poppler_info: PopplerInfo | None = find_pdftotext(pdftotext_path)
 
     with pymupdf.open(pdf_path) as doc:
         if doc.needs_pass:
-            raise ValueError("Password-protected PDFs are not supported in v0.1.")
+            raise ValueError("Password-protected PDFs are not supported in v0.2.")
 
-        pages_out: list[dict[str, Any]] = []
+        native_pages: list[dict] = []
+        any_native_problem = False
 
         for page_index in range(doc.page_count):
             page = doc.load_page(page_index)
             page_id = f"p{page_index + 1:04d}"
+            blocks, text = _extract_native_text_blocks(page, page_id)
+            quality = assess_text(text)
+            if quality.status in {"SUSPECT", "UNUSABLE"}:
+                any_native_problem = True
+            native_pages.append(
+                {
+                    "blocks": blocks,
+                    "text": text,
+                    "quality": quality.to_dict(),
+                }
+            )
 
-            raw_dict = page.get_text("dict", sort=False)
-            reading_map = _reading_order_map(page)
+        poppler_pages: list[dict] | None = None
+        poppler_diagnostics: dict | None = None
+        should_try_poppler = (
+            force_backend == "poppler"
+            or (force_backend == "auto" and any_native_problem)
+        )
 
-            blocks_out: list[dict[str, Any]] = []
-            text_char_count = 0
-
-            for raw_order_index, block in enumerate(raw_dict.get("blocks", [])):
-                block_type = int(block.get("type", -1))
-                source_number = block.get("number")
-                reading_order_index = (
-                    reading_map.get(source_number)
-                    if isinstance(source_number, int)
-                    else None
+        if should_try_poppler:
+            if poppler_info is not None:
+                poppler_pages, poppler_diagnostics = extract_poppler_pages(
+                    pdf_path, poppler_info
+                )
+                if len(poppler_pages) != doc.page_count:
+                    raise RuntimeError(
+                        "Poppler page count does not match PyMuPDF page count: "
+                        f"{len(poppler_pages)} != {doc.page_count}"
+                    )
+            elif force_backend == "poppler":
+                raise RuntimeError(
+                    "--backend poppler requested, but pdftotext was not found. "
+                    "Install Poppler or pass --pdftotext PATH."
                 )
 
-                if block_type == 0:
-                    extracted = _extract_text_block(
-                        block,
-                        page_id=page_id,
-                        raw_order_index=raw_order_index,
-                        reading_order_index=reading_order_index,
-                    )
-                    text_char_count += len(extracted["text"])
-                    blocks_out.append(extracted)
-                elif block_type == 1:
-                    blocks_out.append(
-                        _extract_image_block(
-                            block,
-                            page_id=page_id,
-                            raw_order_index=raw_order_index,
-                            reading_order_index=reading_order_index,
-                            assets_dir=assets_dir,
-                        )
-                    )
-                else:
-                    blocks_out.append(
-                        {
-                            "id": f"{page_id}-b{raw_order_index + 1:04d}",
-                            "type": f"unsupported_block_type_{block_type}",
-                            "source_block_number": source_number,
-                            "raw_order_index": raw_order_index,
-                            "reading_order_index": reading_order_index,
-                            "bbox": _list4(block.get("bbox")),
-                        }
-                    )
+        pages_out: list[dict] = []
+
+        for page_index in range(doc.page_count):
+            page = doc.load_page(page_index)
+            page_id = f"p{page_index + 1:04d}"
+            native = native_pages[page_index]
+
+            chosen = native
+            backend = "PYMUPDF_NATIVE"
+            backend_version = package_version("PyMuPDF")
+
+            if force_backend == "poppler" and poppler_pages is not None:
+                chosen = poppler_pages[page_index]
+                backend = "POPPLER_PDFTOTEXT"
+                backend_version = poppler_info.version if poppler_info else "unknown"
+            elif force_backend == "native":
+                pass
+            elif poppler_pages is not None:
+                alternative = poppler_pages[page_index]
+                if status_rank(alternative["quality"]["status"]) > status_rank(
+                    native["quality"]["status"]
+                ):
+                    chosen = alternative
+                    backend = "POPPLER_PDFTOTEXT"
+                    backend_version = poppler_info.version if poppler_info else "unknown"
+                elif native["quality"]["status"] in {"SUSPECT", "UNUSABLE"} and (
+                    alternative["quality"]["replacement_ratio"]
+                    < native["quality"]["replacement_ratio"]
+                    or alternative["quality"]["control_ratio"]
+                    < native["quality"]["control_ratio"]
+                ):
+                    chosen = alternative
+                    backend = "POPPLER_PDFTOTEXT"
+                    backend_version = poppler_info.version if poppler_info else "unknown"
 
             warnings: list[str] = []
-            if text_char_count == 0:
-                warnings.append("no_text_extracted")
-
-            reading_text_blocks = sorted(
-                (block for block in blocks_out if block["type"] == "text"),
-                key=lambda b: (
-                    b["reading_order_index"] is None,
-                    b["reading_order_index"]
-                    if b["reading_order_index"] is not None
-                    else b["raw_order_index"],
-                ),
-            )
-            plain_text_reading_order = "\n\n".join(
-                block["text"] for block in reading_text_blocks if block["text"]
-            )
+            status = chosen["quality"]["status"]
+            if status == "EMPTY":
+                warnings.append("no_machine_readable_text")
+            if status == "SUSPECT":
+                warnings.append("text_requires_visual_validation")
+            if status == "UNUSABLE":
+                warnings.append("do_not_create_semantic_units_from_this_page")
+            if backend == "PYMUPDF_NATIVE" and native["quality"]["status"] in {
+                "SUSPECT",
+                "UNUSABLE",
+            } and poppler_info is None:
+                warnings.append("poppler_fallback_unavailable")
 
             try:
                 page_label = page.get_label()
             except Exception:
                 page_label = ""
 
-            pages_out.append(
-                {
-                    "id": page_id,
-                    "pdf_page_index": page_index,
-                    "pdf_page_number": page_index + 1,
-                    "page_label": page_label,
-                    "width": float(page.rect.width),
-                    "height": float(page.rect.height),
-                    "rotation": int(page.rotation),
-                    "text_char_count": text_char_count,
-                    "plain_text_reading_order": plain_text_reading_order,
-                    "blocks": blocks_out,
-                    "warnings": warnings,
-                }
-            )
+            page_record = {
+                "schema_version": SCHEMA_VERSION,
+                "source_sha256": source_sha256,
+                "manual_id": manual_id,
+                "id": page_id,
+                "pdf_page_index": page_index,
+                "pdf_page_number": page_index + 1,
+                "page_label": page_label,
+                "width": float(page.rect.width),
+                "height": float(page.rect.height),
+                "rotation": int(page.rotation),
+                "text_layer": {
+                    "backend": backend,
+                    "backend_version": backend_version,
+                    "quality": chosen["quality"],
+                    "blocks": chosen["blocks"],
+                },
+                "images": _extract_images(page, page_id, assets_dir),
+                "warnings": warnings,
+            }
+            page_file = pages_dir / f"{page_id}.json"
+            write_json(page_record, page_file, pretty=False)
+            pages_out.append(page_record)
 
         toc_out = []
         for item in doc.get_toc(simple=True):
@@ -304,11 +385,14 @@ def extract_pdf(
                         "level": int(level),
                         "title": str(title),
                         "pdf_page_number": int(page_number),
-                        "pdf_page_index": int(page_number) - 1 if int(page_number) > 0 else None,
+                        "pdf_page_index": int(page_number) - 1
+                        if int(page_number) > 0
+                        else None,
                     }
                 )
 
-        result = {
+        aggregation = _aggregate_statuses(pages_out)
+        manifest = {
             "schema_version": SCHEMA_VERSION,
             "extractor": {
                 "name": "mathub-material-extractor",
@@ -323,9 +407,17 @@ def extract_pdf(
                 "size_bytes": pdf_path.stat().st_size,
                 "page_count": doc.page_count,
             },
-            "pdf_metadata": _safe_metadata(doc.metadata),
+            "pdf_metadata": {str(k): v for k, v in (doc.metadata or {}).items()},
             "toc": toc_out,
-            "pages": pages_out,
+            "extraction_summary": {
+                "overall_status": _overall_status(pages_out),
+                **aggregation,
+                "poppler": poppler_diagnostics,
+            },
+            "page_files": [f"pages/p{index + 1:04d}.json" for index in range(doc.page_count)],
         }
 
-    return result
+    write_json(manifest, output_dir / "manifest.json")
+    write_json(manifest["extraction_summary"], output_dir / "report.json")
+    write_text(_report_text(manifest), output_dir / "report.txt")
+    return manifest
