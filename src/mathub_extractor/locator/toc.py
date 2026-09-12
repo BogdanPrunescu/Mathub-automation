@@ -122,13 +122,33 @@ def extract_toc_entries(
     toc_pages: set[str],
     by_page: dict[str, list[LineRecord]],
 ) -> list[TocEntry]:
-    entries: list[TocEntry] = []
+    """
+    Extract TOC entries in actual document order.
+
+    TOC section numbers may restart in later chapters, so preserving
+    sequence is essential.
+    """
+    ordered_lines: list[LineRecord] = []
 
     for page_id in toc_pages:
-        for line in by_page.get(page_id, []):
-            entry = _parse_toc_line(line)
-            if entry is not None:
-                entries.append(entry)
+        ordered_lines.extend(by_page.get(page_id, []))
+
+    ordered_lines.sort(
+        key=lambda line: (
+            line.page_index,
+            line.y0,
+            line.block_index,
+            line.line_index,
+        )
+    )
+
+    entries: list[TocEntry] = []
+
+    for line in ordered_lines:
+        entry = _parse_toc_line(line)
+
+        if entry is not None:
+            entries.append(entry)
 
     return entries
 
@@ -171,39 +191,102 @@ def find_next_peer_toc_entry(
     current: TocEntry,
     entries: list[TocEntry],
 ) -> TocEntry | None:
+    """
+    Find the next structural TOC boundary *after this exact entry*.
+
+    Important:
+    section numbers can restart in every chapter, so we must never
+    search globally for another entry merely because it is numbered
+    2, 3, etc.
+
+    Examples:
+
+        1
+            1.1
+            1.2
+            1.3
+        2
+
+    For current=1, return 2.
+
+        1.1
+        1.2
+        1.3
+
+    For current=1.1, return 1.2.
+
+    If the current subsection is the last child, a shallower entry
+    also represents a valid boundary:
+
+        1.5
+        2
+
+    For current=1.5, return 2.
+    """
     current_number = current.section_number
+
     if not current_number:
         return None
 
-    expected = (
-        current_number[:-1]
-        + (current_number[-1] + 1,)
-    )
+    try:
+        current_index = entries.index(current)
+    except ValueError:
+        return None
 
-    # Prefer exact successor: 1 -> 2, 1.1 -> 1.2.
-    for entry in entries:
-        if entry.section_number == expected:
-            return entry
+    current_depth = len(current_number)
+    current_parent = current_number[:-1]
 
-    # Fallback: later same-level entry with same parent.
-    possible = []
-
-    for entry in entries:
+    # Only inspect entries that physically occur AFTER the matched
+    # TOC entry.
+    for entry in entries[current_index + 1:]:
         number = entry.section_number
+
         if not number:
             continue
 
-        if len(number) != len(current_number):
+        depth = len(number)
+
+        # Deeper entries are children of the current section.
+        #
+        # Example:
+        #
+        #   current: 1
+        #       1.1
+        #       1.2
+        #
+        # They belong inside the current evidence region, so skip them.
+        if depth > current_depth:
             continue
 
-        if len(number) > 1 and number[:-1] != current_number[:-1]:
-            continue
+        # A shallower entry means we have left the current hierarchy.
+        #
+        # Example:
+        #
+        #   current: 1.5
+        #   next:    2
+        #
+        # This is a valid boundary.
+        if depth < current_depth:
+            return entry
 
-        if number[-1] > current_number[-1]:
-            possible.append(entry)
+        # Same hierarchy depth.
+        if current_depth == 1:
+            # At top level, the first later numbered section is the
+            # structural boundary.
+            #
+            # If numbering has restarted (e.g. new chapter starts at 1),
+            # that still marks the end of the current region.
+            return entry
 
-    if not possible:
-        return None
+        # For nested sections, remain inside the same parent.
+        #
+        # Example:
+        #   1.2 -> 1.3
+        if number[:-1] == current_parent:
+            return entry
 
-    possible.sort(key=lambda entry: entry.section_number)
-    return possible[0]
+        # Parent changed, so we have left the current hierarchy.
+        # That entry itself marks the boundary.
+        return entry
+
+    return None

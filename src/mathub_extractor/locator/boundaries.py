@@ -1,7 +1,6 @@
 from __future__ import annotations
 from difflib import SequenceMatcher
 
-from .normalize import normalize_for_match
 from .toc import TocEntry
 
 from .model import LineRecord

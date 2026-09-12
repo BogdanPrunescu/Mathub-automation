@@ -218,7 +218,6 @@ def locate_lesson(
             if end_heading is not None:
                 boundary_source = "BODY_HEADING_INFERENCE"
 
-        end_heading = find_next_peer_heading(anchor_line, top.section_number, lines)
         total_pages = int(manifest["source"]["page_count"])
         start_page, end_page = region_page_numbers(anchor_line, end_heading, total_pages)
 

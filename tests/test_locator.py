@@ -227,3 +227,49 @@ def test_locator_rejects_numbered_noise_as_peer_heading(
     # "3 ," on page 2 must NOT become the boundary.
     assert result["boundary"]["pdf_page_number"] == 3
     assert result["boundary"]["text"].startswith("2 Proprietăţi")
+
+def test_toc_peer_search_respects_current_position() -> None:
+    from mathub_extractor.locator.toc import (
+        TocEntry,
+        find_next_peer_toc_entry,
+    )
+
+    def entry(
+        section: tuple[int, ...],
+        title: str,
+        page: int,
+    ) -> TocEntry:
+        number = ".".join(str(x) for x in section)
+
+        return TocEntry(
+            page_id="p0100",
+            pdf_page_number=100,
+            line_id=f"line-{number}-{title}",
+            raw_text=f"{number}. {title} .... {page}",
+            section_number=section,
+            title=title,
+            normalized_title=title.casefold(),
+            printed_page=page,
+        )
+
+    entries = [
+        # Chapter I
+        entry((1,), "Legi de compoziţie", 5),
+        entry((1, 1), "Definiţii", 5),
+        entry((1, 2), "Exemple", 6),
+        entry((2,), "Proprietăţi", 14),
+
+        # Another chapter resets numbering
+        entry((1,), "Primitive", 140),
+        entry((2,), "Integrala nedefinită", 150),
+    ]
+
+    current = entries[0]
+
+    result = find_next_peer_toc_entry(
+        current,
+        entries,
+    )
+
+    assert result is entries[3]
+    assert result.title == "Proprietăţi"
