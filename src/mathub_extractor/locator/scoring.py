@@ -15,6 +15,13 @@ def _jaccard(a: set[str], b: set[str]) -> float:
     return len(a & b) / len(a | b)
 
 
+def _token_sequence_contains(shorter: list[str], longer: list[str]) -> bool:
+    if not shorter or len(shorter) > len(longer):
+        return False
+    width = len(shorter)
+    return any(longer[i : i + width] == shorter for i in range(len(longer) - width + 1))
+
+
 def title_match_score(query: str, line_text: str) -> tuple[float, list[str]]:
     q = normalize_for_match(query)
     _number, candidate = normalized_title_from_line(line_text)
@@ -25,20 +32,29 @@ def title_match_score(query: str, line_text: str) -> tuple[float, list[str]]:
     if candidate == q:
         return 1.0, ["normalized_exact_title"]
 
-    q_tokens = tokens(q)
-    c_tokens = tokens(candidate)
+    q_token_list = q.split()
+    c_token_list = candidate.split()
+    q_tokens = set(q_token_list)
+    c_tokens = set(c_token_list)
     jac = _jaccard(q_tokens, c_tokens)
     seq = SequenceMatcher(None, q, candidate).ratio()
 
     containment = 0.0
-    # Containment is meaningful for title phrases, not for one-token fragments
-    # such as "i" that happen to occur inside a longer lesson title.
-    shorter_tokens = q_tokens if len(q_tokens) <= len(c_tokens) else c_tokens
-    if len(shorter_tokens) >= 2 and (q in candidate or candidate in q):
-        shorter = min(len(q), len(candidate))
-        longer = max(len(q), len(candidate))
-        containment = 0.75 + 0.25 * (shorter / max(1, longer))
-        reasons.append("normalized_containment")
+    # Containment is allowed only for whole contiguous token sequences.
+    # This prevents fragments such as "e c" from matching characters inside
+    # "de compozitie".
+    if len(q_token_list) <= len(c_token_list):
+        shorter_tokens = q_token_list
+        longer_tokens = c_token_list
+    else:
+        shorter_tokens = c_token_list
+        longer_tokens = q_token_list
+
+    if len(shorter_tokens) >= 2 and _token_sequence_contains(shorter_tokens, longer_tokens):
+        shorter_len = len(" ".join(shorter_tokens))
+        longer_len = len(" ".join(longer_tokens))
+        containment = 0.75 + 0.25 * (shorter_len / max(1, longer_len))
+        reasons.append("normalized_token_containment")
 
     score = max(0.55 * jac + 0.45 * seq, containment)
     if jac >= 0.8:
