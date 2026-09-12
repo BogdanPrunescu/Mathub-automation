@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mathub-material-extractor"
-version = "0.3.2"
-description = "Deterministic PDF ingestion and zero-API lesson localization for the Mathub material pipeline."
+version = "0.4.0"
+description = "Deterministic PDF ingestion plus local semantic lesson retrieval for the Mathub material pipeline."
 readme = "README.md"
 requires-python = ">=3.12,<3.15"
 dependencies = [
@@ -16,10 +16,15 @@ dependencies = [
 dev = [
     "pytest>=8,<9",
 ]
+semantic = [
+    "numpy>=2,<3",
+    "sentence-transformers>=3.4,<6",
+]
 
 [project.scripts]
 mathub-extract = "mathub_extractor.cli:main"
 mathub-locate = "mathub_extractor.locator_cli:main"
+mathub-semantic = "mathub_extractor.semantic_cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
