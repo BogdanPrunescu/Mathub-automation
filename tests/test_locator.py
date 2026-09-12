@@ -134,7 +134,7 @@ def test_locator_ignores_toc_and_uses_next_peer_heading(tmp_path: Path) -> None:
     assert "p0001" in result["toc_pages"]
 
 
-def test_locator_returns_not_found_for_unrelated_title(tmp_path: Path) -> None:
+def test_locator_escalates_unrelated_title_without_region(tmp_path: Path) -> None:
     (tmp_path / "pages").mkdir()
     _write_page(tmp_path, 1, [("1.1. Legi de compoziţie", 70, 22)])
 
@@ -152,8 +152,11 @@ def test_locator_returns_not_found_for_unrelated_title(tmp_path: Path) -> None:
     (tmp_path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
 
     result = locate_lesson(tmp_path, lesson_title="Integrale definite")
-    assert result["status"] == "NOT_FOUND"
+    assert result["status"] == "NEEDS_SEMANTIC_LOCALIZATION"
+    assert result["deterministic_status"] == "NOT_FOUND"
     assert result["anchor"] is None
+    assert result["boundary"] is None
+    assert result["target_region"] is None
 
 
 def test_locator_rejects_numbered_noise_as_peer_heading(
@@ -227,6 +230,7 @@ def test_locator_rejects_numbered_noise_as_peer_heading(
     # "3 ," on page 2 must NOT become the boundary.
     assert result["boundary"]["pdf_page_number"] == 3
     assert result["boundary"]["text"].startswith("2 Proprietăţi")
+
 
 def test_toc_peer_search_respects_current_position() -> None:
     from mathub_extractor.locator.toc import (
