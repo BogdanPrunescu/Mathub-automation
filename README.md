@@ -130,3 +130,38 @@ The page JSON is machine-facing evidence for later lesson localization and SEU c
 7. Text is stored once at span/word level to avoid v0.1's massive duplication.
 8. Images remain separate content-addressed assets.
 9. SEUs, alignment, lesson synthesis, embeddings, LLMs, and OCR remain outside this repository stage.
+
+
+## v0.3: deterministic lesson localization
+
+After extracting a manual once, locate a lesson without rereading the PDF and without any model/API call:
+
+```powershell
+mathub-locate ".\outputs\manual-all" `
+  --lesson "Legi de compoziție"
+```
+
+The locator performs:
+
+1. Romanian/diacritic-insensitive lexical normalization;
+2. line-level title matching;
+3. heading-likeness scoring using numbering, geometry, length and page position;
+4. TOC-page detection and TOC support without selecting the TOC as lesson evidence;
+5. numbered heading hierarchy analysis;
+6. exclusive boundary detection at the next peer heading;
+7. one-page context preservation by default;
+8. explicit `FOUND_HIGH_CONFIDENCE`, `FOUND_LOW_CONFIDENCE`,
+   `MULTIPLE_CANDIDATES`, or `NOT_FOUND` outcomes.
+
+Default output:
+
+```text
+<manual-output>/
+└── locations/
+    ├── legi-de-compozitie.json
+    └── legi-de-compozitie.txt
+```
+
+The localization result is an evidence-capture proposal, not a final lesson-inclusion decision.
+
+No embeddings, LLMs, vector database or API calls are used by v0.3 localization.

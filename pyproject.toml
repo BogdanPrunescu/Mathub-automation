@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mathub-material-extractor"
-version = "0.2.0"
-description = "Deterministic PDF ingestion with quality-gated text extraction for the Mathub material pipeline."
+version = "0.3.0"
+description = "Deterministic PDF ingestion and zero-API lesson localization for the Mathub material pipeline."
 readme = "README.md"
 requires-python = ">=3.12,<3.15"
 dependencies = [
@@ -19,6 +19,7 @@ dev = [
 
 [project.scripts]
 mathub-extract = "mathub_extractor.cli:main"
+mathub-locate = "mathub_extractor.locator_cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

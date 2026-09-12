@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.3.0
+
+- Added `mathub-locate` deterministic lesson-localization CLI.
+- Added diacritic-insensitive title normalization and lexical candidate search.
+- Added structural heading scoring from numbering, line geometry, page position and line length.
+- Added heuristic TOC-page detection; TOC hits support but do not become body anchors.
+- Added numbered heading hierarchy and `NEXT_PEER_HEADING` end-boundary detection.
+- Added one-page neighboring context preservation by default.
+- Added explicit localization outcomes:
+  - `FOUND_HIGH_CONFIDENCE`
+  - `FOUND_LOW_CONFIDENCE`
+  - `MULTIPLE_CANDIDATES`
+  - `NOT_FOUND`
+- Added machine-readable localization JSON plus human-readable `.txt` report.
+- Added locator tests including TOC-vs-body disambiguation and peer-heading boundaries.
+- No embeddings, LLMs, vector DB, OCR or API calls were added.
+
 ## v0.2.0
 
 - Replaced the single huge `document.json` with `manifest.json` plus one compact JSON file per page.
