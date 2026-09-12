@@ -35,7 +35,7 @@ def _toc_support(query: str, toc_pages: set[str], by_page: dict) -> tuple[bool, 
     return bool(matches), matches
 
 
-def _status(candidates: list, top_score: float, margin: float) -> str:
+def _deterministic_status(candidates: list, top_score: float, margin: float) -> str:
     if not candidates or top_score < 0.50:
         return "NOT_FOUND"
     if top_score >= 0.82 and margin >= 0.10:
@@ -47,6 +47,12 @@ def _status(candidates: list, top_score: float, margin: float) -> str:
     return "FOUND_LOW_CONFIDENCE"
 
 
+def _public_status(deterministic_status: str) -> str:
+    if deterministic_status == "FOUND_HIGH_CONFIDENCE":
+        return deterministic_status
+    return "NEEDS_SEMANTIC_LOCALIZATION"
+
+
 def _human_report(result: dict) -> str:
     lines = [
         "Mathub lesson localization report",
@@ -55,6 +61,7 @@ def _human_report(result: dict) -> str:
         f"Manual ID: {result['manual_id']}",
         f"Requested lesson: {result['requested_lesson']['title']}",
         f"Status: {result['status']}",
+        f"Deterministic status: {result['deterministic_status']}",
         "",
     ]
 
@@ -86,7 +93,7 @@ def _human_report(result: dict) -> str:
         lines.extend(
             [
                 "Detected end boundary:",
-                "  No peer heading found; conservative fallback page window used.",
+                "  No peer heading found.",
                 "",
             ]
         )
@@ -102,6 +109,14 @@ def _human_report(result: dict) -> str:
                 "",
                 f"Context before: {', '.join(region['context_before_pages']) or 'none'}",
                 f"Context after: {', '.join(region['context_after_pages']) or 'none'}",
+                "",
+            ]
+        )
+    elif result["status"] == "NEEDS_SEMANTIC_LOCALIZATION":
+        lines.extend(
+            [
+                "Target evidence region:",
+                "  Not created automatically because deterministic localization was not high confidence.",
                 "",
             ]
         )
@@ -127,10 +142,8 @@ def _human_report(result: dict) -> str:
         [
             "",
             "Interpretation:",
-            "  FOUND_HIGH_CONFIDENCE = cheap deterministic localization is sufficient.",
-            "  FOUND_LOW_CONFIDENCE  = candidate exists but should be reviewed.",
-            "  MULTIPLE_CANDIDATES   = cheap methods could not confidently choose one.",
-            "  NOT_FOUND             = escalate localization; do not invent a region.",
+            "  FOUND_HIGH_CONFIDENCE       = deterministic localization is accepted.",
+            "  NEEDS_SEMANTIC_LOCALIZATION = deterministic evidence is insufficient; escalate instead of inventing a region.",
             "",
             "The region is an evidence-capture proposal, not a final lesson-inclusion decision.",
             "",
@@ -165,20 +178,21 @@ def locate_lesson(
     top = candidates[0] if candidates else None
     second = candidates[1] if len(candidates) > 1 else None
     margin = (top.final_score - second.final_score) if top and second else (top.final_score if top else 0.0)
-    status = _status(candidates, top.final_score if top else 0.0, margin)
+    deterministic_status = _deterministic_status(candidates, top.final_score if top else 0.0, margin)
+    status = _public_status(deterministic_status)
 
     anchor = None
     boundary = None
     target_region = None
 
-    if top and status != "NOT_FOUND":
+    # Only high-confidence deterministic localization is allowed to create a
+    # target evidence region. Everything else is explicitly escalated.
+    if top and deterministic_status == "FOUND_HIGH_CONFIDENCE":
         anchor_line = top.line
 
         end_heading = None
         boundary_source = None
 
-        # Preferred path:
-        # use the textbook's own TOC structure.
         current_toc_entry = find_matching_toc_entry(
             top.section_number,
             lesson_title,
@@ -193,10 +207,7 @@ def locate_lesson(
                 toc_entries,
             )
 
-        if (
-            current_toc_entry is not None
-            and next_toc_entry is not None
-        ):
+        if current_toc_entry is not None and next_toc_entry is not None:
             end_heading = find_expected_toc_boundary(
                 anchor=anchor_line,
                 current_toc_entry=current_toc_entry,
@@ -207,7 +218,6 @@ def locate_lesson(
             if end_heading is not None:
                 boundary_source = "TOC_CONFIRMED"
 
-        # Fallback only if TOC cannot establish the boundary.
         if end_heading is None:
             end_heading = find_next_peer_heading(
                 anchor_line,
@@ -243,12 +253,8 @@ def locate_lesson(
                 ),
             }
             if next_toc_entry is not None:
-                boundary["expected_toc_title"] = (
-                    next_toc_entry.title
-                )
-                boundary["expected_printed_page"] = (
-                    next_toc_entry.printed_page
-                )
+                boundary["expected_toc_title"] = next_toc_entry.title
+                boundary["expected_printed_page"] = next_toc_entry.printed_page
 
         before = [
             f"p{p:04d}"
@@ -279,7 +285,7 @@ def locate_lesson(
         }
 
     result = {
-        "locator_version": "0.3.0",
+        "locator_version": "0.3.2",
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "manual_id": manifest["source"]["manual_id"],
         "source_sha256": manifest["source"]["sha256"],
@@ -288,6 +294,7 @@ def locate_lesson(
             "normalized_title": normalize_for_match(lesson_title),
         },
         "status": status,
+        "deterministic_status": deterministic_status,
         "score_margin": round(margin, 4),
         "anchor": anchor,
         "boundary": boundary,
