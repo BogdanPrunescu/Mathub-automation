@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mathub-material-extractor"
-version = "0.3.0"
+version = "0.3.2"
 description = "Deterministic PDF ingestion and zero-API lesson localization for the Mathub material pipeline."
 readme = "README.md"
 requires-python = ">=3.12,<3.15"
