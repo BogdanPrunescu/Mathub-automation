@@ -12,9 +12,46 @@ _TRAILING_PAGE_RE = re.compile(r"(?:\.{2,}\s*)?\b\d{1,4}\s*$")
 _PUNCT_RE = re.compile(r"[^\w\s]+", flags=re.UNICODE)
 _WS_RE = re.compile(r"\s+")
 
+# Search-only repair for common Romanian legacy-PDF encodings. This never
+# changes canonical extracted source text; it only makes equivalent visible
+# spellings compare the same during localization.
+_LEGACY_SEARCH_TRANSLATION = str.maketrans(
+    {
+        "ã": "ă",
+        "Ã": "Ă",
+        "þ": "ţ",
+        "Þ": "Ţ",
+        "º": "ş",
+        "ª": "Ş",
+        # Other old font/code-page mappings seen in Romanian textbook PDFs.
+        "æ": "ţ",
+        "Æ": "Ţ",
+        "ç": "ş",
+        "Ç": "Ş",
+    }
+)
+
+# UTF-8 text that has been mis-decoded as a Western single-byte encoding.
+# These repairs are likewise search-only and deterministic.
+_LEGACY_SEARCH_SEQUENCES = (
+    ("Å£", "ţ"),
+    ("Åž", "Ş"),
+    ("ÅŸ", "ş"),
+    ("Äƒ", "ă"),
+    ("Ã®", "î"),
+    ("Ã¢", "â"),
+)
+
 
 def nfc(text: str) -> str:
     return unicodedata.normalize("NFC", text or "")
+
+
+def repair_legacy_for_search(text: str) -> str:
+    repaired = nfc(text)
+    for broken, replacement in _LEGACY_SEARCH_SEQUENCES:
+        repaired = repaired.replace(broken, replacement)
+    return repaired.translate(_LEGACY_SEARCH_TRANSLATION)
 
 
 def fold_diacritics(text: str) -> str:
@@ -23,6 +60,7 @@ def fold_diacritics(text: str) -> str:
 
 
 def normalize_for_match(text: str) -> str:
+    text = repair_legacy_for_search(text)
     text = fold_diacritics(text).casefold()
     text = _PUNCT_RE.sub(" ", text)
     return _WS_RE.sub(" ", text).strip()
