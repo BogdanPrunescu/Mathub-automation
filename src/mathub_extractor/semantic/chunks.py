@@ -75,24 +75,25 @@ def build_retrieval_chunks(
         if not tokens:
             continue
 
-        starts = list(range(0, len(tokens), step))
         page_chunk_index = 0
+        start = 0
+        previous_start: int | None = None
 
-        for start in starts:
+        while start < len(tokens):
             end = min(len(tokens), start + chunk_words)
 
             # If the final window would be tiny, shift it backward so the tail
             # remains represented without creating a near-empty chunk.
             if end == len(tokens) and (end - start) < min_words and start > 0:
                 start = max(0, len(tokens) - chunk_words)
-                if chunks and chunks[-1].page_id == page_id:
-                    previous = chunks[-1]
-                    if previous.start_line_id == tokens[start][1] and previous.end_line_id == tokens[end - 1][1]:
-                        break
+                end = len(tokens)
+
+            if previous_start == start:
+                break
 
             window = tokens[start:end]
             if not window:
-                continue
+                break
 
             raw_text = " ".join(word for word, _line_id in window)
             embedding_text = repair_legacy_for_search(raw_text)
@@ -113,7 +114,9 @@ def build_retrieval_chunks(
                 )
             )
 
+            previous_start = start
             if end == len(tokens):
                 break
+            start += step
 
     return chunks
